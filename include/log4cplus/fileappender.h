@@ -37,7 +37,12 @@
 #include <fstream>
 #include <locale>
 #include <memory>
+#include <functional>
 
+namespace std {
+	class thread;
+}
+class Condition;
 
 namespace log4cplus
 {
@@ -331,6 +336,9 @@ namespace log4cplus
         void rollover(bool alreadyLocked = false);
         log4cplus::helpers::Time calculateNextRolloverTime(const log4cplus::helpers::Time& t) const;
         log4cplus::tstring getFilename(const log4cplus::helpers::Time& t) const;
+		void deleteExpiredFiles();
+		const std::string ws2s(const std::wstring& ws);
+		const std::wstring s2ws(const std::string& s);
 
       // Data
         DailyRollingFileSchedule schedule;
@@ -339,6 +347,10 @@ namespace log4cplus
         int maxBackupIndex;
         bool rollOnClose;
         log4cplus::tstring datePattern;
+		std::thread* p_thread;///<del timeout file
+		Condition* p_condition;
+		bool tRunning;
+		bool bNotify;
 
     private:
         LOG4CPLUS_PRIVATE void init(DailyRollingFileSchedule schedule);
