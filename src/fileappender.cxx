@@ -36,6 +36,20 @@
 #include <cstdio>
 #include <stdexcept>
 #include <cmath> // std::fmod
+#include <iostream>
+#include <cstring>        // for strcat()
+#include <io.h>
+
+#ifdef WIN32
+#include <direct.h>
+#elif LINUX
+#include <unistd.h>
+#endif
+
+#include <stdlib.h>
+#include <iomanip> 
+#include <thread>
+#include "log4cplus\condition.h"
 
 // For _wrename() and _wremove() on Windows.
 #include <stdio.h>
@@ -157,6 +171,7 @@ rolloverFiles(const tstring& filename, unsigned int maxBackupIndex)
     // Delete the oldest file
     tostringstream buffer;
     buffer << filename << LOG4CPLUS_TEXT(".") << maxBackupIndex;
+
     long ret = file_remove (buffer.str ());
 
     tostringstream source_oss;
@@ -238,7 +253,7 @@ FileAppenderBase::FileAppenderBase(const Properties& props,
     , bufferSize (0)
     , buffer (nullptr)
 {
-    filename = props.getProperty(LOG4CPLUS_TEXT("File"));
+	filename = props.getProperty(LOG4CPLUS_TEXT("File")) +LOG4CPLUS_TEXT(".") + helpers::getFormattedTime("%Y-%m-%d", helpers::truncate_fractions(helpers::now()), false);
     lockFileName = props.getProperty (LOG4CPLUS_TEXT ("LockFile"));
     localeName = props.getProperty (LOG4CPLUS_TEXT ("Locale"), LOG4CPLUS_TEXT ("DEFAULT"));
 
@@ -732,20 +747,44 @@ adjust_for_time_zone (Time const & t, std::chrono::seconds const & tzoffset)
 
 } // namespace
 
-
 void
 DailyRollingFileAppender::init(DailyRollingFileSchedule sch)
 {
     this->schedule = sch;
     Time now = helpers::truncate_fractions (helpers::now ());
-    scheduledFilename = getFilename(now);
+	//scheduledFilename = getFilename(now);
     nextRolloverTime = calculateNextRolloverTime(now);
+	tRunning = true;
+	bNotify = false;
+	p_condition = new Condition;
+	p_thread = new std::thread(&DailyRollingFileAppender::deleteExpiredFiles,this);
 }
 
 
 
 DailyRollingFileAppender::~DailyRollingFileAppender()
 {
+	if (p_thread)
+	{
+		if (p_thread->joinable())
+		{
+			tRunning = false;
+			bNotify = false;
+			p_condition->notify();
+
+			p_thread->join();
+		}
+
+		delete p_thread;
+		p_thread = NULL;
+	}
+
+	if (p_condition)
+	{
+		delete p_condition;
+		p_condition = NULL;
+	}
+
     destructorImpl();
 }
 
@@ -782,8 +821,6 @@ DailyRollingFileAppender::append(const spi::InternalLoggingEvent& event)
     FileAppender::append(event);
 }
 
-
-
 void
 DailyRollingFileAppender::rollover(bool alreadyLocked)
 {
@@ -811,56 +848,62 @@ DailyRollingFileAppender::rollover(bool alreadyLocked)
     // don't overwrite any of those previous files.
     // E.g. if "log.2009-11-07.1" already exists we rename it
     // to "log.2009-11-07.2", etc.
-    rolloverFiles(scheduledFilename, maxBackupIndex);
+    //rolloverFiles(scheduledFilename, maxBackupIndex);
 
     // Do not overwriet the newest file either, e.g. if "log.2009-11-07"
     // already exists rename it to "log.2009-11-07.1"
-    tostringstream backup_target_oss;
-    backup_target_oss << scheduledFilename << LOG4CPLUS_TEXT(".") << 1;
-    tstring backupTarget = backup_target_oss.str();
+    //tostringstream backup_target_oss;
+    //backup_target_oss << scheduledFilename << LOG4CPLUS_TEXT(".") << 1;
+    //tstring backupTarget = backup_target_oss.str();
 
     helpers::LogLog & loglog = helpers::getLogLog();
-    long ret;
+    //long ret;
 
 #if defined (_WIN32)
     // Try to remove the target first. It seems it is not
     // possible to rename over existing file, e.g. "log.2009-11-07.1".
-    ret = file_remove (backupTarget);
+    //ret = file_remove (backupTarget);
 #endif
-
     // Rename e.g. "log.2009-11-07" to "log.2009-11-07.1".
-    ret = file_rename (scheduledFilename, backupTarget);
-    loglog_renaming_result (loglog, scheduledFilename, backupTarget, ret);
+    //ret = file_rename (scheduledFilename, backupTarget);
+    //loglog_renaming_result (loglog, scheduledFilename, backupTarget, ret);
 
 #if defined (_WIN32)
     // Try to remove the target first. It seems it is not
     // possible to rename over existing file, e.g. "log.2009-11-07".
-    ret = file_remove (scheduledFilename);
+    //ret = file_remove (scheduledFilename);
 #endif
-
     // Rename filename to scheduledFilename,
     // e.g. rename "log" to "log.2009-11-07".
-    loglog.debug(
-        LOG4CPLUS_TEXT("Renaming file ")
-        + filename
-        + LOG4CPLUS_TEXT(" to ")
-        + scheduledFilename);
-    ret = file_rename (filename, scheduledFilename);
-    loglog_renaming_result (loglog, filename, scheduledFilename, ret);
+    //loglog.debug(
+     //   LOG4CPLUS_TEXT("Renaming file ")
+      //  + filename
+      //  + LOG4CPLUS_TEXT(" to ")
+      //  + scheduledFilename);
+    //ret = file_rename (filename, scheduledFilename);
+    //loglog_renaming_result (loglog, filename, scheduledFilename, ret);
+
+	log4cplus::helpers::Time now = helpers::now();
+	
+	int index = filename.find_last_of(".");
+	filename = filename.substr(0, index);
+	filename = getFilename(now);
 
     // Open a new file, e.g. "log".
     open(std::ios::out | std::ios::trunc);
     loglog_opening_result (loglog, out, filename);
 
     // Calculate the next rollover time
-    log4cplus::helpers::Time now = helpers::now ();
+    
     if (now >= nextRolloverTime)
     {
-        scheduledFilename = getFilename(now);
+        //scheduledFilename = getFilename(now);
         nextRolloverTime = calculateNextRolloverTime(now);
     }
-}
 
+	bNotify = false;
+	p_condition->notify();
+}
 
 static
 Time
@@ -1078,6 +1121,175 @@ DailyRollingFileAppender::getFilename(const Time& t) const
     result += LOG4CPLUS_TEXT(".");
     result += helpers::getFormattedTime(pattern, t, false);
     return result;
+}
+
+const std::string 
+DailyRollingFileAppender::ws2s(const std::wstring& ws)
+{
+	std::locale old_loc =
+		std::locale::global(std::locale(""));
+
+	const wchar_t* src_wstr = ws.c_str();
+	size_t buffer_size = ws.size() * 4 + 1;
+	char* dst_str = new char[buffer_size];
+	memset(dst_str, 0, buffer_size);
+	wcstombs(dst_str, src_wstr, buffer_size);
+	std::string result = dst_str;
+	delete[]dst_str;
+	dst_str = NULL;
+
+	std::locale::global(old_loc);
+
+	return result;
+}
+
+const std::wstring 
+DailyRollingFileAppender::s2ws(const std::string& s)
+{
+	std::locale old_loc =
+		std::locale::global(std::locale(""));
+
+	const char* src_str = s.c_str();
+	const size_t buffer_size = s.size() + 1;
+	wchar_t* dst_wstr = new wchar_t[buffer_size];
+	wmemset(dst_wstr, 0, buffer_size);
+	mbstowcs(dst_wstr, src_str, buffer_size);
+	std::wstring result = dst_wstr;
+	delete[]dst_wstr;
+	dst_wstr = NULL;
+
+	std::locale::global(old_loc);
+
+	return result;
+}
+
+void 
+DailyRollingFileAppender::deleteExpiredFiles()
+{
+	while (tRunning)
+	{
+		while (bNotify)
+		{
+			p_condition->wait();
+		}
+
+		intptr_t handle;
+		_finddata_t findData;
+
+		char *buffer = NULL;
+		//也可以将buffer作为输出参数
+		if ((buffer = getcwd(NULL, 0)) == NULL)
+		{
+			helpers::getLogLog().error(LOG4CPLUS_TEXT("getcwd error"));
+			return;
+		}
+
+		std::string temp_filename;
+
+#ifdef UNICODE
+		temp_filename = ws2s(filename);
+#else
+		temp_filename = filename;
+#endif // UNICODE
+
+		int index = temp_filename.find_last_of("/");
+
+		char dir[100];
+		memset(dir, '0', sizeof(dir));
+		snprintf(dir, sizeof(dir), "%s/%s", buffer,temp_filename.substr(0,index).c_str());
+		free(buffer);
+		buffer = NULL;
+
+		if (-1 == access(dir, 0))
+		{
+			helpers::getLogLog().error(LOG4CPLUS_TEXT("log dir not exsit"));
+			return;
+		}
+
+		char wildchar[512];
+		memset(wildchar, '0', sizeof(wildchar));
+		
+		std::string basename = temp_filename.substr(index + 1);
+
+		index = basename.find_last_of(".");
+		basename = basename.substr(0,index);
+
+		snprintf(wildchar, sizeof(wildchar), "%s/%s.*", dir,basename.c_str());
+
+		handle = _findfirst(wildchar, &findData);    // 查找目录中的第一个文件
+		if (handle == -1)
+		{
+			helpers::getLogLog().error(LOG4CPLUS_TEXT("Failed to find first file"));
+			return;
+		}
+
+		do
+		{
+			if (!tRunning)
+			{
+				helpers::getLogLog().warn(LOG4CPLUS_TEXT("del file thread quit"));
+				break;
+			}
+
+			if (findData.attrib & _A_SUBDIR
+				&& strcmp(findData.name, ".") == 0
+				&& strcmp(findData.name, "..") == 0
+				)    // 是否是子目录并且不为"."或".."
+			{
+
+			}
+			else
+			{
+				std::string name(findData.name);
+
+				int index_first = name.find_first_not_of(basename);
+				if (index_first != std::string::npos)
+				{
+					int index_last = name.find_last_not_of(basename);
+					std::string time;
+					if (std::string::npos != index_last)
+					{
+						if (index_last == index_first)
+						{
+							time = name.substr(index_first + 1);
+						}
+						else
+						{
+							time = name.substr(index_first + 1, index_last - index_first + 1);
+						}
+						time.append(" 00:00:00");
+
+						std::tm tm = {};
+						std::stringstream ss(time);
+						ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
+						auto tp = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+						int diff_time = abs(std::chrono::duration_cast<std::chrono::hours>(tp - std::chrono::system_clock::now()).count());
+
+						if ((double)diff_time / 24 > 30)
+						{
+							name = name.insert(0, "/");
+							if (0 != remove(name.insert(0, dir).c_str()))
+							{
+								char err[100];
+								snprintf(err, sizeof(err), "del file:%s failed", name.c_str());
+#ifdef UNICODE
+								std::string sErr(err);
+								helpers::getLogLog().error(s2ws(sErr));
+#else
+								helpers::getLogLog().error(err);
+#endif
+								//
+							}
+						}
+					}
+				}
+			}
+		} while (_findnext(handle, &findData) == 0);    // 查找目录中的下一个文件
+
+		_findclose(handle);    // 关闭搜索句柄
+
+		bNotify = true;
+	}
 }
 
 ///////////////////////////////////////////////////////////////////////////////
